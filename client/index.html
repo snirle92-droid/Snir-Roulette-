@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Roulette — 5 Players</title>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      html,body,#root{height:100%}
+      .wheel-wrap { position: relative; width: 100%; max-width: 420px; margin: 0 auto; }
+      .wheel { width: 100%; aspect-ratio: 1/1; border-radius: 50%; border: 10px solid #0f172a; background: radial-gradient(#0a0e1a, #04060c); position: relative; overflow: hidden; }
+      .wheel .ring { position:absolute; inset: 8%; border-radius: 50%; border: 6px solid #1f2937; }
+      .wheel .nums { position:absolute; inset: 0; display:flex; align-items:center; justify-content:center; }
+      .wheel .ball { position:absolute; left:50%; top:50%; width:14px; height:14px; background:#f9fafb; border-radius:50%; transform: translate(-50%,-50%) rotate(0deg) translateY(-44%); transition: transform 1.6s cubic-bezier(0.2, 0.9, 0.2, 1.0); box-shadow: 0 0 6px rgba(255,255,255,.8); }
+      .wheel .disc { position:absolute; left:50%; top:50%; transform-origin:center; transform: translate(-50%,-50%) rotate(0deg); transition: transform 1.6s cubic-bezier(0.2, 0.9, 0.2, 1.0); }
+      .pointer { position:absolute; top:-4px; left:50%; transform:translateX(-50%); width:0; height:0; border-left: 10px solid transparent; border-right:10px solid transparent; border-bottom:14px solid #fbbf24; }
+      .chip { display:inline-flex; align-items:center; justify-content:center; width:22px; height:22px; border-radius:50%; background:#22c55e; color:#001; font-weight:700; font-size:11px; border:2px solid #065f46; box-shadow:0 2px 6px rgba(0,0,0,.5); }
+      .chip.small { width:18px; height:18px; font-size:10px; }
+      .cell { position:relative; }
+      .cell .chip-on { position:absolute; right:2px; bottom:2px; }
+    </style>
+  </head>
+  <body class="bg-slate-950 text-slate-100">
+    <div id="root"></div>
+
+    <script type="text/babel">
+      const { useMemo, useState, useEffect, useRef } = React;
+
+      const WS_DEFAULT = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host;
+
+      function useTicker(timerEnd) {
+        const [now, setNow] = useState(Date.now());
+        useEffect(()=>{ const id = setInterval(()=>setNow(Date.now()), 200); return ()=>clearInterval(id) }, []);
+        const msLeft = Math.max(0, (timerEnd || 0) - now);
+        const s = Math.ceil(msLeft/1000);
+        return s;
+      }
+
+      function Chip({value, small}) {
+        return <span className={'chip ' + (small?'small':'')}>{value}</span>;
+      }
+
+      function Row({children}){ return <div className="flex items-center gap-2 flex-wrap">{children}</div> }
+
+      function RouletteWheel({wheelOrder, resultNumber, spinning}) {
+        // Map number -> angle
+        const order = wheelOrder || [0,32,15,19,4,21,2,25,17,34,6,27,13,36,11,30,8,23,10,5,24,16,33,1,20,14,31,9,22,18,29,7,28,12,35,3,26];
+        const index = resultNumber != null ? order.indexOf(resultNumber) : -1;
+        const degPerSlot = 360 / order.length;
+        const targetAngle = index >= 0 ? (index * degPerSlot) : 0;
+
+        const [angle, setAngle] = useState(0);
+        const [ballAngle, setBallAngle] = useState(0);
+
+        useEffect(() => {
+          if (spinning && index >= 0) {
+            // add extra spins for flair
+            const extra = 720; // two full spins
+            setAngle(-(targetAngle + extra));
+            setBallAngle(-(targetAngle + extra));
+          }
+        }, [spinning, resultNumber]);
+
+        return (
+          <div className="wheel-wrap">
+            <div className="pointer"></div>
+            <div className="wheel">
+              {/* Disc with number wedges (simple text ring for demo) */}
+              <div className="disc" style={{width:'88%', height:'88%',
+                   transform:`translate(-50%,-50%) rotate(${angle}deg)`}}>
+                <svg viewBox="0 0 100 100" width="100%" height="100%">
+                  <g transform="translate(50,50)">
+                    {order.map((num, i)=>{
+                      const a = i * degPerSlot;
+                      const r = 40;
+                      const x = Math.cos((a-90)*Math.PI/180) * r;
+                      const y = Math.sin((a-90)*Math.PI/180) * r;
+                      const isZero = num===0;
+                      return (
+                        <text key={i} x={x} y={y} textAnchor="middle" dominantBaseline="middle"
+                          style={{fontSize: isZero? 6.5:5.5, fontWeight:700, fill: isZero? '#22c55e' : ( [1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36].includes(num) ? '#ef4444' : '#9ca3af')}}>
+                          {num}
+                        </text>
+                      )
+                    })}
+                  </g>
+                </svg>
+              </div>
+              <div className="ring"></div>
+              <div className="ball" style={{ transform:`translate(-50%,-50%) rotate(${ballAngle}deg) translateY(-44%)` }}></div>
+            </div>
+          </div>
+        );
+      }
+
+      function App(){
+        const [serverUrl, setServerUrl] = useState(WS_DEFAULT);
+        const [roomId, setRoomId] = useState('table-1');
+        const [name, setName] = useState('Player');
+        const [ws, setWs] = useState(null);
+        const [connected, setConnected] = useState(false);
+        const [playerId, setPlayerId] = useState(null);
+        const [room, setRoom] = useState(null);
+        const [phase, setPhase] = useState('waiting');
+        const [timerEnd, setTimerEnd] = useState(0);
+        const [betAmount, setBetAmount] = useState(10);
+        const [lastResult, setLastResult] = useState(null);
+        const [history, setHistory] = useState([]);
+        const [wheelOrder, setWheelOrder] = useState(null);
+        const sLeft = useTicker(timerEnd);
+
+        const connect = () => {
+          try { if (ws) ws.close(); } catch{}
+          const sock = new WebSocket(serverUrl);
+          sock.onopen = () => {
+            setConnected(true);
+            sock.send(JSON.stringify({ type:'join', data:{ roomId, name }}));
+          };
+          sock.onmessage = (ev) => {
+            const msg = JSON.parse(ev.data);
+            if (msg.type === 'joined') {
+              setPlayerId(msg.data.playerId);
+              setRoom(msg.data.room);
+              setPhase(msg.data.room.phase);
+              setTimerEnd(msg.data.room.timerEnd||0);
+              setLastResult(msg.data.room.lastResult||null);
+              setHistory(msg.data.room.history||[]);
+              setWheelOrder(msg.data.room.wheel||null);
+            }
+            if (msg.type === 'room_update') {
+              setRoom(msg.data);
+              setPhase(msg.data.phase);
+              setTimerEnd(msg.data.timerEnd||0);
+              setLastResult(msg.data.lastResult||null);
+              setHistory(msg.data.history||[]);
+              setWheelOrder(msg.data.wheel||null);
+            }
+            if (msg.type === 'timer') {
+              setTimerEnd(msg.data.timerEnd||0);
+            }
+            if (msg.type === 'spin_result') {
+              setLastResult(msg.data);
+            }
+            if (msg.type === 'error') {
+              alert('Error: '+ (msg.data?.code||'unknown'));
+            }
+          };
+          sock.onclose = () => { setConnected(false); setWs(null); };
+          setWs(sock);
+        };
+
+        const myChips = useMemo(()=>{
+          if (!room || !playerId) return 0;
+          const me = room.players?.find(p=>p.id===playerId);
+          return me?.chips ?? 0;
+        }, [room, playerId]);
+
+        const placeBet = (bet) => {
+          if (!ws || !playerId) return;
+          ws.send(JSON.stringify({ type:'place_bet', data: { playerId, bet }}));
+        };
+
+        const BetButton = ({label, bet, betKey}) => {
+          const amountOn = room?.publicBets?.[betKey] || 0;
+          return (
+            <button onClick={()=>placeBet(bet)} className="relative px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-sm">
+              {label}
+              {amountOn>0 && <span className="absolute -top-2 -right-2"><Chip value={amountOn} small/></span>}
+            </button>
+          );
+        };
+
+        const numbers = Array.from({length:37}, (_,i)=>i);
+
+        useEffect(()=>{ connect(); }, []);
+
+        return (
+          <div className="min-h-full p-4 max-w-7xl mx-auto">
+            <header className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-4">
+              <h1 className="text-2xl font-semibold">🎰 Roulette — up to 5 players</h1>
+              <div className="flex items-center gap-2 flex-wrap">
+                <input className="px-2 py-1 rounded bg-slate-900 border border-slate-700 w-[12rem]" value={serverUrl} onChange={e=>setServerUrl(e.target.value)} />
+                <input className="px-2 py-1 rounded bg-slate-900 border border-slate-700 w-[9rem]" value={roomId} onChange={e=>setRoomId(e.target.value)} />
+                <input className="px-2 py-1 rounded bg-slate-900 border border-slate-700 w-[9rem]" value={name} onChange={e=>setName(e.target.value)} />
+                <button onClick={connect} className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50" disabled={connected}>Join</button>
+              </div>
+            </header>
+
+            <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+              {/* Table & betting */}
+              <div className="xl:col-span-2 flex flex-col gap-4">
+                <div className="rounded-2xl border border-slate-700 p-4 bg-slate-900/40">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="text-sm opacity-80">Room <b>{room?.id}</b> • Round <b>{room?.round}</b> • Phase <b>{phase}</b></div>
+                    <div className="text-sm">⏳ {phase==='betting' ? `${sLeft}s to bet` : 'spinning...'}</div>
+                  </div>
+
+                  {/* Wheel */}
+                  <div className="mb-4">
+                    <RouletteWheel wheelOrder={wheelOrder} resultNumber={lastResult?.number ?? 0} spinning={phase==='spinning'} />
+                  </div>
+
+                  <div className="mb-3 flex items-center gap-3 flex-wrap">
+                    <Row>
+                      {[10,25,50,100,200].map(v=>
+                        <button key={v} onClick={()=>setBetAmount(v)} className={"px-3 py-1 rounded-full border text-sm " + (betAmount===v?"bg-emerald-500/20 border-emerald-500":"border-slate-600 hover:bg-slate-800")}>{v}</button>
+                      )}
+                      <input type="number" min="1" className="px-2 py-1 rounded bg-slate-800 border border-slate-600 w-20" value={betAmount} onChange={e=>setBetAmount(parseInt(e.target.value||0))} />
+                      <span className="text-sm opacity-80">Your chips: <b>{myChips}</b></span>
+                    </Row>
+                  </div>
+
+                  <div className="grid md:grid-cols-2 gap-3">
+                    <div className="rounded-xl border border-slate-700 p-3">
+                      <div className="text-sm mb-2 opacity-80">Inside bets</div>
+                      <div className="grid grid-cols-7 gap-1">
+                        {numbers.map(n=> {
+                          const key = `n_${n}`;
+                          const sum = room?.publicBets?.[key] || 0;
+                          return (
+                            <button key={n} disabled={phase!=='betting'}
+                              onClick={()=>placeBet({ type:'number', value:n, amount:betAmount })}
+                              className={`cell relative aspect-square rounded text-sm border ${n===0? 'bg-emerald-700/30 border-emerald-600':'bg-slate-800 border-slate-600 hover:bg-slate-700'}`}>
+                              {n}
+                              {sum>0 && <span className="chip-on"><Chip value={sum} small/></span>}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-slate-700 p-3">
+                      <div className="text-sm mb-2 opacity-80">Outside bets</div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <BetButton label={`Red (1:1) — ${betAmount}`} bet={{ type:'color', value:'red', amount:betAmount }} betKey="color_red" />
+                        <BetButton label={`Black (1:1) — ${betAmount}`} bet={{ type:'color', value:'black', amount:betAmount }} betKey="color_black" />
+                        <BetButton label={`Even (1:1) — ${betAmount}`} bet={{ type:'parity', value:'even', amount:betAmount }} betKey="parity_even" />
+                        <BetButton label={`Odd (1:1) — ${betAmount}`} bet={{ type:'parity', value:'odd', amount:betAmount }} betKey="parity_odd" />
+                        <BetButton label={`Low 1–18 (1:1) — ${betAmount}`} bet={{ type:'range', value:'low', amount:betAmount }} betKey="range_low" />
+                        <BetButton label={`High 19–36 (1:1) — ${betAmount}`} bet={{ type:'range', value:'high', amount:betAmount }} betKey="range_high" />
+                        <BetButton label={`1st Dozen 1–12 (2:1) — ${betAmount}`} bet={{ type:'dozen', value:1, amount:betAmount }} betKey="dozen_1" />
+                        <BetButton label={`2nd Dozen 13–24 (2:1) — ${betAmount}`} bet={{ type:'dozen', value:2, amount:betAmount }} betKey="dozen_2" />
+                        <BetButton label={`3rd Dozen 25–36 (2:1) — ${betAmount}`} bet={{ type:'dozen', value:3, amount:betAmount }} betKey="dozen_3" />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 p-3 rounded-xl bg-slate-900 border border-slate-700 flex items-center justify-between">
+                    <div className="text-sm">Last result: {lastResult ? (<b> {lastResult.number} ({lastResult.color})</b>) : '—'}</div>
+                    <div className="text-sm opacity-80">Recent: {history?.slice(-10).map(h=>h.number).join(', ') || '—'}</div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Sidebar */}
+              <div className="flex flex-col gap-4">
+                <div className="rounded-2xl border border-slate-700 p-4 bg-slate-900/40">
+                  <div className="font-semibold mb-2">Players & chips</div>
+                  <div className="space-y-2">
+                    {room?.players?.map(p=> (
+                      <div key={p.id} className={`flex items-center justify-between px-3 py-2 rounded-xl border ${p.id===playerId? 'border-emerald-600 bg-emerald-500/10' : 'border-slate-700 bg-slate-900'}`}>
+                        <div className="truncate">{p.name}{p.id===playerId?' (you)':''}</div>
+                        <div className="font-mono">{p.chips}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-slate-700 p-4 bg-slate-900/40 text-xs opacity-80">
+                  <div className="font-semibold mb-2 text-slate-200">How it works</div>
+                  <ul className="list-disc ml-4 space-y-1">
+                    <li>Up to 5 players per room. Everyone starts with 1000 chips.</li>
+                    <li>Each round opens a 30s betting window; then the wheel spins.</li>
+                    <li>Stake is deducted on bet; winners get profit per odds (35:1, 2:1, 1:1).</li>
+                    <li>Supported bets: straight number, red/black, even/odd, low/high, dozens.</li>
+                    <li>During betting you’ll see chips pile up on each spot.</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+
+            <footer className="mt-6 text-center text-xs opacity-60">Demo game for educational use only.</footer>
+          </div>
+        );
+      }
+
+      ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+    </script>
+  </body>
+</html>
